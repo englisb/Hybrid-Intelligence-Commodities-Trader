@@ -2,13 +2,7 @@
 Historical backtesting engine.
 
 Simulates a trading strategy over historical price data and calculates
-performance metrics.  Supports all three strategies:
-  - Hybrid (primary)
-  - ATR Trend Following (comparison)
-  - VIX-Gold Hedge (comparison)
-
-Validates against the problem-statement requirement that the Hybrid model
-achieves a profit factor > 1.8.
+performance metrics.
 """
 
 from __future__ import annotations
