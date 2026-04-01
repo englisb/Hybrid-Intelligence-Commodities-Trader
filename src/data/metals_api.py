@@ -114,3 +114,84 @@ def get_historical_prices(
         current += timedelta(days=1)
 
     return records
+
+
+def get_historical_prices_range(
+    symbol: str,
+    start: date | str,
+    end: date | str,
+) -> list[dict[str, Any]]:
+    """
+    Return daily historical spot prices for a single metal symbol using the
+    ``/timeframe`` endpoint (one API call, far more efficient than per-day
+    queries for long date ranges).
+
+    Parameters
+    ----------
+    symbol:
+        Metal ticker symbol, e.g. ``"XAU"``.
+    start:
+        Start date (``date`` object or ISO-format string ``"YYYY-MM-DD"``).
+    end:
+        End date (inclusive).
+
+    Returns
+    -------
+    List of dicts with keys ``date`` (str) and ``price`` (float), sorted
+    ascending by date.
+    """
+    if isinstance(start, date):
+        start = start.isoformat()
+    if isinstance(end, date):
+        end = end.isoformat()
+
+    data = _get(
+        "timeframe",
+        {"start_date": start, "end_date": end, "base": "USD", "symbols": symbol},
+    )
+    rates: dict[str, dict[str, float]] = data.get("rates", {})
+
+    records: list[dict[str, Any]] = []
+    for date_str in sorted(rates.keys()):
+        day_rates = rates[date_str]
+        if symbol in day_rates and day_rates[symbol] != 0:
+            records.append({"date": date_str, "price": 1.0 / day_rates[symbol]})
+        else:
+            logger.warning("No rate for %s on %s", symbol, date_str)
+
+    return records
+
+
+def format_as_ohlcv(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Convert Metals-API price records to OHLCV format expected by strategy
+    modules.
+
+    Since the API provides a single daily spot price, ``open``, ``high`` and
+    ``low`` are approximated using standard intraday range assumptions:
+    open = close × 0.999 (−0.1 %), high = close × 1.005 (+0.5 %),
+    low = close × 0.995 (−0.5 %).
+
+    Parameters
+    ----------
+    records:
+        List of dicts with keys ``date`` (str) and ``price`` (float), as
+        returned by :func:`get_historical_prices` or
+        :func:`get_historical_prices_range`.
+
+    Returns
+    -------
+    List of OHLCV dicts with keys ``date``, ``open``, ``high``, ``low``,
+    ``close``, ``adjusted_close``.
+    """
+    return [
+        {
+            "date": r["date"],
+            "open": r["price"] * 0.999,
+            "high": r["price"] * 1.005,
+            "low": r["price"] * 0.995,
+            "close": r["price"],
+            "adjusted_close": r["price"],
+        }
+        for r in records
+    ]
