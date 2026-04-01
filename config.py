@@ -12,7 +12,6 @@ load_dotenv()
 # API credentials
 # ---------------------------------------------------------------------------
 METALS_API_KEY: str = os.getenv("METALS_API_KEY", "")
-ALPHA_VANTAGE_API_KEY: str = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
 # ---------------------------------------------------------------------------
@@ -24,16 +23,6 @@ COMMODITIES = {
     "silver": "XAG",
     "diamonds": "DIAMOND",
 }
-
-# ETFs and mining stocks tracked via Alpha Vantage
-EQUITY_TICKERS = [
-    "GLD",   # SPDR Gold Shares ETF
-    "SLV",   # iShares Silver Trust ETF
-    "URA",   # Global X Uranium ETF
-    "NEM",   # Newmont Mining
-    "GOLD",  # Barrick Gold
-    "CCJ",   # Cameco (Uranium miner)
-]
 
 # ---------------------------------------------------------------------------
 # Hard-coded risk constraints (problem statement §Hard Coded Constraints)
@@ -66,7 +55,7 @@ SENTIMENT_DEFENSIVE_EXIT_LEVEL: int = 5      # Level 5 → start countdown
 # Strategy thresholds
 # ---------------------------------------------------------------------------
 TARGET_ACCURACY_RATE: float = 0.75           # 75% accuracy target
-MIN_PROFIT_FACTOR: float = 1.8               # Hybrid must beat comparison strategies
+MIN_PROFIT_FACTOR: float = 1.8               # Minimum acceptable profit factor
 
 # ---------------------------------------------------------------------------
 # Information cutoff – no market data beyond this date is used
@@ -82,9 +71,6 @@ BACKTEST_WINDOWS = [
     ("2015-01-01", "2018-12-31"),    # Window 2: Recovery / Low volatility
     ("2007-01-01", "2009-12-31"),    # Window 1: Global Financial Crisis
 ]
-
-MONTE_CARLO_RUNS: int = 1_000   # Minimum simulations for confidence testing
-CONFIDENCE_LEVEL: float = 0.80   # 80% confidence level target
 
 # ---------------------------------------------------------------------------
 # Predictive accuracy backtesting (paper-trading mode)

@@ -8,14 +8,14 @@ Quantitative algorithms process historical data at high speeds but lack contextu
 
 - **AI layer**: Continuous ATR-based technical signal generation and Claude LLM news sentiment classification (1–5 scale)
 - **Human layer**: Strategic oversight for Level 4/5 geopolitical events with a 5-minute Defensive Exit window
-- **Target**: 75% accuracy rate with a profit factor > 1.8 over comparison strategies
+- **Target**: 75% accuracy rate
 
 ## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                   Data Ingestion Layer                    │
-│  Metals-API (XAU, UXF26, XAG)  │  Alpha Vantage (ETFs)  │
+│              Metals-API (XAU, UXF26, XAG)                │
 │           Reuters / Bloomberg RSS News Feeds              │
 └─────────────────────┬───────────────────────────────────┘
                       │
@@ -60,7 +60,6 @@ Quantitative algorithms process historical data at high speeds but lack contextu
 ├── src/
 │   ├── data/
 │   │   ├── metals_api.py          # Metals-API client (XAU, UXF26, XAG)
-│   │   ├── alpha_vantage.py       # Alpha Vantage equity/ETF client
 │   │   └── news_scraper.py        # Reuters & Bloomberg RSS scraper
 │   ├── agents/
 │   │   ├── sentiment_classifier.py # Claude LLM sentiment (1-5)
@@ -70,19 +69,15 @@ Quantitative algorithms process historical data at high speeds but lack contextu
 │   │   ├── risk_manager.py        # 30% limit, kill switch, defensive exit
 │   │   └── order_manager.py       # Trade validation & execution
 │   ├── strategies/
-│   │   ├── hybrid.py              # Primary: ATR + sentiment overlay
-│   │   ├── atr_trend.py           # Comparison: ATR trend-following
-│   │   └── vix_gold_hedge.py      # Comparison: VIX-Gold correlation
+│   │   └── hybrid.py              # Primary: ATR + sentiment overlay
 │   ├── backtesting/
-│   │   ├── backtester.py          # Historical simulation engine
-│   │   └── monte_carlo.py         # Monte Carlo stress testing (≥1,000 runs)
+│   │   └── backtester.py          # Historical simulation engine
 │   └── paper_trading.py           # Multi-scale predictive accuracy backtest
 └── tests/
     ├── test_portfolio.py
     ├── test_risk_manager.py
     ├── test_sentiment_classifier.py
-    ├── test_backtester.py
-    └── test_monte_carlo.py
+    └── test_backtester.py
 ```
 
 ## Setup
@@ -99,7 +94,6 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and fill in your API keys:
 #   METALS_API_KEY        – https://metals-api.com
-#   ALPHA_VANTAGE_API_KEY – https://www.alphavantage.co
 #   ANTHROPIC_API_KEY     – https://console.anthropic.com
 ```
 
@@ -114,9 +108,6 @@ python main.py backtest
 
 # Multi-scale predictive accuracy backtest (5-year → weekly → daily, zero capital risk)
 python main.py paper
-
-# Comparative strategy analysis (Hybrid vs ATR vs VIX-Gold)
-python main.py compare
 ```
 
 ## Testing & Validation
@@ -136,20 +127,6 @@ pytest tests/ -v
 | 3 | 2019–2022 | COVID-19 + Recovery |
 | 4 | 2023–2025 | Post-pandemic / Geopolitical stress |
 
-### Monte Carlo validation
-
-- Minimum **1,000 simulation runs** with randomised slippage and fee variables
-- Target: **≥ 80% of runs** end profitably (confidence level)
-- Hybrid model must achieve **profit factor > 1.8** vs both comparison strategies
-
-## Comparison Strategies
-
-| Strategy | Description |
-|---|---|
-| **Hybrid** (primary) | ATR technical signals gated by Claude sentiment analysis |
-| **ATR Trend Following** | Pure technical, ATR breakout with SMA trend filter |
-| **VIX-Gold Hedge** | Correlation model: VIX spikes → long Gold safe-haven |
-
 ## Commodities & Tickers
 
 | Asset | Ticker | Data Source |
@@ -157,8 +134,3 @@ pytest tests/ -v
 | Gold | XAU | Metals-API |
 | Uranium | UXF26 | Metals-API |
 | Silver | XAG | Metals-API |
-| GLD ETF | GLD | Alpha Vantage |
-| Uranium ETF | URA | Alpha Vantage |
-| Newmont Mining | NEM | Alpha Vantage |
-| Barrick Gold | GOLD | Alpha Vantage |
-| Cameco | CCJ | Alpha Vantage |
