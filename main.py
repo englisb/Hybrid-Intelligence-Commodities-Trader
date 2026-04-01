@@ -8,7 +8,7 @@ Usage::
 Modes:
   monitor      Run continuous news-monitoring loop (default).
   backtest     Run historical backtests over all configured windows.
-  paper        Run paper trading simulation (1 week, zero capital risk).
+  paper        Run multi-scale predictive accuracy backtest (5-year → weekly → daily).
   compare      Run comparative strategy analysis (Hybrid vs ATR vs VIX-Gold).
 """
 
@@ -87,11 +87,22 @@ def _run_backtest() -> None:
 
 
 def _run_paper() -> None:
-    from src.paper_trading import PaperTrader
+    """
+    Run the multi-scale predictive accuracy backtest.
 
-    trader = PaperTrader(initial_capital=100_000.0, poll_interval_seconds=60)
-    session = trader.run(days=7)
-    print(json.dumps(session.to_dict(), indent=2))
+    Replaces the 1-week live simulation with a walk-forward validation
+    protocol using historical data from 2000 through December 2025:
+
+    1. 5-year blocks  – 200 predictions per window, verified year-by-year
+    2. Weekly blocks  – 52-week training, 1-week verification
+    3. Daily blocks   – 30-day training, 1-day verification
+    """
+    from src.paper_trading import PredictiveBacktester
+
+    backtester = PredictiveBacktester()
+    sessions = backtester.run()
+    output = {label: session.to_dict() for label, session in sessions.items()}
+    print(json.dumps(output, indent=2))
 
 
 def _run_compare() -> None:

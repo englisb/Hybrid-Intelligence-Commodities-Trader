@@ -128,17 +128,41 @@ def fetch_all_feeds() -> list[NewsArticle]:
     return unique
 
 
-def fetch_commodity_relevant_news() -> list[NewsArticle]:
+def fetch_commodity_relevant_news(
+    cutoff: datetime | None = None,
+) -> list[NewsArticle]:
     """
     Return only commodity-relevant articles from all configured feeds.
 
     Filters the full article list using :meth:`NewsArticle.is_commodity_relevant`.
+    Articles published after *cutoff* are excluded to enforce the information
+    cutoff date (``config.DATA_CUTOFF``).
+
+    Parameters
+    ----------
+    cutoff:
+        Upper bound on article publication datetime.  Defaults to
+        ``config.DATA_CUTOFF`` (December 2025).  Pass ``None`` explicitly
+        to disable the filter.
     """
+    if cutoff is None and hasattr(config, "DATA_CUTOFF"):
+        try:
+            cutoff = datetime.fromisoformat(config.DATA_CUTOFF).replace(
+                tzinfo=timezone.utc
+            )
+        except (ValueError, AttributeError):
+            cutoff = None
+
     articles = fetch_all_feeds()
+
+    if cutoff is not None:
+        articles = [a for a in articles if a.published <= cutoff]
+
     relevant = [a for a in articles if a.is_commodity_relevant()]
     logger.info(
-        "%d of %d articles flagged as commodity-relevant",
+        "%d of %d articles flagged as commodity-relevant (cutoff: %s)",
         len(relevant),
         len(articles),
+        cutoff.isoformat() if cutoff else "none",
     )
     return relevant

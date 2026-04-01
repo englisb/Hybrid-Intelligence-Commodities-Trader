@@ -1,17 +1,36 @@
 """
-Paper trading simulation.
+Paper trading simulation and predictive accuracy backtesting.
 
-Runs a live (zero-capital-risk) simulation for a configurable duration
-(default 1 week / 7 days) using real market data and the full Hybrid
-strategy pipeline.  Calibrates the LLM's news-weighting responses against
-real market reactions without risking real capital.
+**Legacy mode** – :class:`PaperTrader`
+    Runs a live (zero-capital-risk) simulation for a configurable duration
+    using real market data and the full Hybrid strategy pipeline.
+
+**Backtesting mode** – :class:`PredictiveBacktester`
+    Replaces the 1-week live simulation with a multi-scale walk-forward
+    validation protocol that verifies prediction accuracy using historical
+    data from 2000 through December 2025 (the information cutoff).
+
+    Protocol:
+
+    1. **5-year blocks** – Use a 5-year training window to generate up to 200
+       forward predictions covering the following 3-year horizon.  Verify
+       year-by-year as new data is revealed, record discrepancies, then
+       advance the window by one year and repeat until ``DATA_CUTOFF``.
+
+    2. **Weekly blocks** – Refine temporal resolution to 52-week training
+       windows with 1-week verification steps, capturing short-term
+       volatility patterns.
+
+    3. **Daily blocks** – Finest resolution: 30-day training windows with
+       1-day verification steps, acting as the minimum batch size for
+       training data.
 
 Usage::
 
-    from src.paper_trading import PaperTrader
-    trader = PaperTrader(initial_capital=100_000.0)
-    trader.run(days=7)
-    print(trader.summary())
+    from src.paper_trading import PredictiveBacktester
+    backtester = PredictiveBacktester()
+    results = backtester.run()
+    print(results["five_year_blocks"].to_dict())
 """
 
 from __future__ import annotations
@@ -19,8 +38,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+import numpy as np
 
 import config
 from src.execution.portfolio import Portfolio
@@ -252,3 +273,557 @@ class PaperTrader:
             "trade_history_count": len(self._portfolio.trade_history),
             "sentiment_events": len(self._sentiment_log),
         }
+
+
+# ===========================================================================
+# Predictive Accuracy Backtester
+# ===========================================================================
+
+
+def _build_price_series(
+    start_date: str, end_date: str, seed: int = 42
+) -> list[dict[str, Any]]:
+    """
+    Generate synthetic daily price data between two ISO dates.
+
+    NOTE: Replace with real historical data from Alpha Vantage / Metals-API
+    for production backtesting.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    n_days = (end - start).days + 1
+
+    rng = np.random.default_rng(seed)
+    prices = 300.0 * np.cumprod(1 + rng.normal(0.0003, 0.012, n_days))
+
+    result: list[dict[str, Any]] = []
+    for i in range(n_days):
+        d = start + timedelta(days=i)
+        p = float(prices[i])
+        result.append(
+            {
+                "date": d.isoformat(),
+                "open": p * 0.999,
+                "high": p * 1.005,
+                "low": p * 0.995,
+                "close": p,
+                "adjusted_close": p,
+            }
+        )
+    return result
+
+
+def _slice_by_date(
+    data: list[dict[str, Any]], start: str, end: str
+) -> list[dict[str, Any]]:
+    """Return rows where start <= row['date'] <= end."""
+    return [row for row in data if start <= row["date"] <= end]
+
+
+def _add_years(date_str: str, years: int) -> str:
+    """Add *years* to an ISO date string, clamping to DATA_CUTOFF."""
+    d = date.fromisoformat(date_str)
+    try:
+        result = d.replace(year=d.year + years)
+    except ValueError:
+        result = d.replace(year=d.year + years, day=28)
+    cutoff = date.fromisoformat(config.DATA_CUTOFF)
+    return min(result, cutoff).isoformat()
+
+
+def _add_weeks(date_str: str, weeks: int) -> str:
+    """Add *weeks* to an ISO date string, clamping to DATA_CUTOFF."""
+    result = date.fromisoformat(date_str) + timedelta(weeks=weeks)
+    cutoff = date.fromisoformat(config.DATA_CUTOFF)
+    return min(result, cutoff).isoformat()
+
+
+def _add_days(date_str: str, days: int) -> str:
+    """Add *days* to an ISO date string, clamping to DATA_CUTOFF."""
+    result = date.fromisoformat(date_str) + timedelta(days=days)
+    cutoff = date.fromisoformat(config.DATA_CUTOFF)
+    return min(result, cutoff).isoformat()
+
+
+@dataclass
+class PredictionRecord:
+    """Records a single forward prediction and its eventual verification."""
+
+    training_start: str
+    training_end: str
+    prediction_index: int
+    signal: str          # "long" or "short"
+    entry_price: float
+    stop_loss: float
+    verified: bool = False
+    predicted_correct: bool | None = None
+    discrepancy_note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "training_start": self.training_start,
+            "training_end": self.training_end,
+            "prediction_index": self.prediction_index,
+            "signal": self.signal,
+            "entry_price": round(self.entry_price, 4),
+            "stop_loss": round(self.stop_loss, 4),
+            "verified": self.verified,
+            "predicted_correct": self.predicted_correct,
+            "discrepancy_note": self.discrepancy_note,
+        }
+
+
+@dataclass
+class VerificationResult:
+    """Outcome of checking one block's predictions against a period of new data."""
+
+    training_start: str
+    training_end: str
+    verification_start: str
+    verification_end: str
+    total_predictions: int
+    correct_predictions: int
+    discrepancies: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def accuracy_rate(self) -> float:
+        if self.total_predictions == 0:
+            return 0.0
+        return self.correct_predictions / self.total_predictions
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "training_window": f"{self.training_start} \u2192 {self.training_end}",
+            "verification_period": (
+                f"{self.verification_start} \u2192 {self.verification_end}"
+            ),
+            "total_predictions": self.total_predictions,
+            "correct_predictions": self.correct_predictions,
+            "accuracy_rate_pct": round(self.accuracy_rate * 100, 2),
+            "discrepancy_count": len(self.discrepancies),
+            "discrepancies": self.discrepancies,
+        }
+
+
+@dataclass
+class PredictiveBacktestSession:
+    """Complete results from a single-phase predictive accuracy run."""
+
+    window_type: str            # "5-year", "weekly", or "daily"
+    data_start: str
+    data_end: str               # Never exceeds DATA_CUTOFF
+    training_window_label: str  # e.g. "5-year", "52-week", "30-day"
+    predictions_per_block: int
+    verification_results: list[VerificationResult] = field(default_factory=list)
+
+    @property
+    def overall_accuracy(self) -> float:
+        total = sum(v.total_predictions for v in self.verification_results)
+        correct = sum(v.correct_predictions for v in self.verification_results)
+        return correct / total if total > 0 else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "window_type": self.window_type,
+            "data_start": self.data_start,
+            "data_end": self.data_end,
+            "training_window": self.training_window_label,
+            "predictions_per_block": self.predictions_per_block,
+            "overall_accuracy_pct": round(self.overall_accuracy * 100, 2),
+            "total_verification_blocks": len(self.verification_results),
+            "verification_results": [v.to_dict() for v in self.verification_results],
+        }
+
+
+class PredictiveBacktester:
+    """
+    Multi-scale predictive accuracy backtester.
+
+    Replaces the 1-week live simulation with a walk-forward validation
+    protocol that verifies prediction accuracy across three temporal scales,
+    acting as a method to alter the batch size of training data.
+
+    Phase 1 – 5-year blocks (``run_five_year_blocks``)
+        Train on a 5-year window, generate up to ``PREDICTIONS_PER_BLOCK``
+        (200) forward signals covering the following ``PREDICTION_HORIZON_YEARS``
+        (3), then fact-check one ``VERIFICATION_STEP_YEARS`` (1) year at a
+        time as new data is revealed.  Slide the window forward by one year
+        and repeat until ``DATA_CUTOFF`` (December 2025).
+
+    Phase 2 – weekly blocks (``run_weekly_blocks``)
+        Refine to 52-week training windows with 1-week verification steps
+        to capture short-term market volatility patterns.
+
+    Phase 3 – daily blocks (``run_daily_blocks``)
+        Finest resolution: 30-day training windows with 1-day verification
+        steps — the minimum batch size for training data.
+
+    Parameters
+    ----------
+    price_data:
+        Optional pre-loaded price series.  If omitted, synthetic data is
+        generated as a placeholder — replace with real historical API data
+        for production use.
+    """
+
+    def __init__(self, price_data: list[dict[str, Any]] | None = None) -> None:
+        if price_data is not None:
+            self._price_data = price_data
+        else:
+            self._price_data = _build_price_series(
+                config.PREDICTIVE_BACKTEST_START,
+                config.PREDICTIVE_BACKTEST_END,
+            )
+        logger.info(
+            "PredictiveBacktester initialised: %d price records (%s \u2192 %s).",
+            len(self._price_data),
+            config.PREDICTIVE_BACKTEST_START,
+            config.PREDICTIVE_BACKTEST_END,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _generate_predictions(
+        self,
+        training_data: list[dict[str, Any]],
+        training_start: str,
+        training_end: str,
+    ) -> list[PredictionRecord]:
+        """Generate up to PREDICTIONS_PER_BLOCK signals from training_data."""
+        if not training_data:
+            return []
+        signals = hybrid_signals(training_data, sentiment_level=1)
+        actionable = [s for s in signals if s.signal in ("long", "short")]
+        selected = actionable[: config.PREDICTIONS_PER_BLOCK]
+        return [
+            PredictionRecord(
+                training_start=training_start,
+                training_end=training_end,
+                prediction_index=i,
+                signal=s.signal,
+                entry_price=s.entry_price,
+                stop_loss=s.stop_loss,
+            )
+            for i, s in enumerate(selected)
+        ]
+
+    @staticmethod
+    def _verify_prediction(
+        record: PredictionRecord,
+        verification_data: list[dict[str, Any]],
+    ) -> PredictionRecord:
+        """
+        Verify a prediction against a verification period's price movement.
+
+        Checks whether the closing price at the end of the verification
+        period moved in the direction implied by the prediction signal.
+        A discrepancy is logged when the actual direction contradicts the
+        prediction.
+        """
+        if not verification_data:
+            return record
+
+        final_price = verification_data[-1]["close"]
+        if record.signal == "long":
+            correct = final_price > record.entry_price
+        else:
+            correct = final_price < record.entry_price
+
+        note = ""
+        if not correct:
+            direction = "up" if final_price > record.entry_price else "down"
+            note = (
+                f"Predicted {record.signal} from {record.entry_price:.2f}; "
+                f"actual price moved {direction} to {final_price:.2f}."
+            )
+        return PredictionRecord(
+            training_start=record.training_start,
+            training_end=record.training_end,
+            prediction_index=record.prediction_index,
+            signal=record.signal,
+            entry_price=record.entry_price,
+            stop_loss=record.stop_loss,
+            verified=True,
+            predicted_correct=correct,
+            discrepancy_note=note,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run_five_year_blocks(self) -> PredictiveBacktestSession:
+        """
+        Phase 1 – 5-year training blocks.
+
+        For each 5-year training window, generate up to 200 predictions
+        for the following 3-year horizon and then verify one year at a
+        time as new data is revealed.  Window slides forward by 1 year
+        per iteration until ``DATA_CUTOFF``.
+
+        Example sequence:
+          * Train 2000–2004 → predict 2005–2007 → verify 2005, 2006, 2007
+          * Train 2001–2005 → predict 2006–2008 → verify 2006, 2007, 2008
+          * … continue until December 2025
+        """
+        tw = config.TRAINING_WINDOW_YEARS    # 5
+        ph = config.PREDICTION_HORIZON_YEARS  # 3
+        vs = config.VERIFICATION_STEP_YEARS   # 1
+        cutoff = config.DATA_CUTOFF
+
+        session = PredictiveBacktestSession(
+            window_type="5-year",
+            data_start=config.PREDICTIVE_BACKTEST_START,
+            data_end=config.PREDICTIVE_BACKTEST_END,
+            training_window_label=f"{tw}-year",
+            predictions_per_block=config.PREDICTIONS_PER_BLOCK,
+        )
+
+        window_start = config.PREDICTIVE_BACKTEST_START
+        while window_start < cutoff:
+            training_end = _add_years(window_start, tw)
+            if training_end >= cutoff:
+                break
+
+            training_data = _slice_by_date(
+                self._price_data, window_start, training_end
+            )
+            predictions = self._generate_predictions(
+                training_data, window_start, training_end
+            )
+
+            if not predictions:
+                window_start = _add_years(window_start, vs)
+                continue
+
+            # Verify year-by-year for up to PREDICTION_HORIZON_YEARS
+            for yr in range(ph):
+                v_start = _add_years(training_end, yr)
+                v_end = _add_years(training_end, yr + vs)
+                if v_start > cutoff:
+                    break
+
+                v_data = _slice_by_date(
+                    self._price_data, v_start, min(v_end, cutoff)
+                )
+                if not v_data:
+                    break
+
+                verified = [
+                    self._verify_prediction(p, v_data) for p in predictions
+                ]
+                correct = sum(1 for p in verified if p.predicted_correct)
+                discrepancies = [
+                    p.to_dict() for p in verified if not p.predicted_correct
+                ]
+
+                result = VerificationResult(
+                    training_start=window_start,
+                    training_end=training_end,
+                    verification_start=v_start,
+                    verification_end=min(v_end, cutoff),
+                    total_predictions=len(verified),
+                    correct_predictions=correct,
+                    discrepancies=discrepancies,
+                )
+                session.verification_results.append(result)
+                logger.info(
+                    "[5-year] train %s\u2192%s | verify %s\u2192%s | "
+                    "%d/%d correct (%.1f%%)",
+                    window_start,
+                    training_end,
+                    v_start,
+                    result.verification_end,
+                    correct,
+                    len(verified),
+                    result.accuracy_rate * 100,
+                )
+
+            window_start = _add_years(window_start, vs)
+
+        return session
+
+    def run_weekly_blocks(self) -> PredictiveBacktestSession:
+        """
+        Phase 2 – weekly training windows.
+
+        Refines temporal resolution by training on a rolling 52-week
+        window and verifying predictions against the following week.
+        Starts from ``WEEKLY_BLOCKS_START`` to remain computationally
+        tractable.
+        """
+        training_weeks = 52
+        cutoff = config.DATA_CUTOFF
+
+        session = PredictiveBacktestSession(
+            window_type="weekly",
+            data_start=config.WEEKLY_BLOCKS_START,
+            data_end=config.PREDICTIVE_BACKTEST_END,
+            training_window_label=f"{training_weeks}-week",
+            predictions_per_block=config.PREDICTIONS_PER_BLOCK,
+        )
+
+        window_start = config.WEEKLY_BLOCKS_START
+        while window_start < cutoff:
+            training_end = _add_weeks(window_start, training_weeks)
+            if training_end >= cutoff:
+                break
+
+            v_start = _add_days(training_end, 1)
+            v_end = _add_weeks(v_start, 1)
+            if v_start > cutoff:
+                break
+
+            training_data = _slice_by_date(
+                self._price_data, window_start, training_end
+            )
+            v_data = _slice_by_date(
+                self._price_data, v_start, min(v_end, cutoff)
+            )
+            predictions = self._generate_predictions(
+                training_data, window_start, training_end
+            )
+
+            if predictions and v_data:
+                verified = [
+                    self._verify_prediction(p, v_data) for p in predictions
+                ]
+                correct = sum(1 for p in verified if p.predicted_correct)
+                discrepancies = [
+                    p.to_dict() for p in verified if not p.predicted_correct
+                ]
+                result = VerificationResult(
+                    training_start=window_start,
+                    training_end=training_end,
+                    verification_start=v_start,
+                    verification_end=min(v_end, cutoff),
+                    total_predictions=len(verified),
+                    correct_predictions=correct,
+                    discrepancies=discrepancies,
+                )
+                session.verification_results.append(result)
+                logger.debug(
+                    "[weekly] train %s\u2192%s | verify %s\u2192%s | "
+                    "%d/%d correct",
+                    window_start,
+                    training_end,
+                    v_start,
+                    result.verification_end,
+                    correct,
+                    len(verified),
+                )
+
+            window_start = _add_weeks(window_start, 1)
+
+        logger.info(
+            "[weekly] complete: %d blocks, overall accuracy=%.1f%%",
+            len(session.verification_results),
+            session.overall_accuracy * 100,
+        )
+        return session
+
+    def run_daily_blocks(self) -> PredictiveBacktestSession:
+        """
+        Phase 3 – daily training windows.
+
+        Finest temporal resolution: trains on a 30-day rolling window
+        and verifies the next day's direction.  Acts as the minimum batch
+        size for training data.  Starts from ``DAILY_BLOCKS_START``.
+        """
+        training_days = 30
+        cutoff = config.DATA_CUTOFF
+
+        session = PredictiveBacktestSession(
+            window_type="daily",
+            data_start=config.DAILY_BLOCKS_START,
+            data_end=config.PREDICTIVE_BACKTEST_END,
+            training_window_label=f"{training_days}-day",
+            predictions_per_block=config.PREDICTIONS_PER_BLOCK,
+        )
+
+        window_start = config.DAILY_BLOCKS_START
+        while window_start < cutoff:
+            training_end = _add_days(window_start, training_days)
+            if training_end >= cutoff:
+                break
+
+            v_start = _add_days(training_end, 1)
+            v_end = _add_days(v_start, 1)
+            if v_start > cutoff:
+                break
+
+            training_data = _slice_by_date(
+                self._price_data, window_start, training_end
+            )
+            v_data = _slice_by_date(
+                self._price_data, v_start, min(v_end, cutoff)
+            )
+            predictions = self._generate_predictions(
+                training_data, window_start, training_end
+            )
+
+            if predictions and v_data:
+                verified = [
+                    self._verify_prediction(p, v_data) for p in predictions
+                ]
+                correct = sum(1 for p in verified if p.predicted_correct)
+                discrepancies = [
+                    p.to_dict() for p in verified if not p.predicted_correct
+                ]
+                result = VerificationResult(
+                    training_start=window_start,
+                    training_end=training_end,
+                    verification_start=v_start,
+                    verification_end=min(v_end, cutoff),
+                    total_predictions=len(verified),
+                    correct_predictions=correct,
+                    discrepancies=discrepancies,
+                )
+                session.verification_results.append(result)
+                logger.debug(
+                    "[daily] train %s\u2192%s | verify %s | %d/%d correct",
+                    window_start,
+                    training_end,
+                    v_start,
+                    correct,
+                    len(verified),
+                )
+
+            window_start = _add_days(window_start, 1)
+
+        logger.info(
+            "[daily] complete: %d blocks, overall accuracy=%.1f%%",
+            len(session.verification_results),
+            session.overall_accuracy * 100,
+        )
+        return session
+
+    def run(self) -> dict[str, PredictiveBacktestSession]:
+        """
+        Run the full multi-scale predictive accuracy backtest.
+
+        Executes all three phases sequentially:
+        1. 5-year blocks (2000 → 2025)
+        2. Weekly blocks (``WEEKLY_BLOCKS_START`` → 2025)
+        3. Daily blocks  (``DAILY_BLOCKS_START`` → 2025)
+
+        Returns
+        -------
+        dict mapping phase label to :class:`PredictiveBacktestSession`.
+        """
+        logger.info("Starting multi-scale predictive accuracy backtest.")
+        results = {
+            "five_year_blocks": self.run_five_year_blocks(),
+            "weekly_blocks": self.run_weekly_blocks(),
+            "daily_blocks": self.run_daily_blocks(),
+        }
+        for label, session in results.items():
+            logger.info(
+                "Phase '%s' complete: overall_accuracy=%.1f%%, blocks=%d.",
+                label,
+                session.overall_accuracy * 100,
+                len(session.verification_results),
+            )
+        return results
