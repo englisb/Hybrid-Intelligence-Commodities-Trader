@@ -20,7 +20,6 @@ from src.backtesting.backtester import (
     _compute_max_drawdown,
 )
 from src.strategies.hybrid import generate_signals as hybrid_sigs
-from src.strategies.atr_trend import generate_signals as atr_sigs
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +215,8 @@ class TestRunBacktest:
 
     def test_to_dict_has_required_keys(self):
         price_data = _make_trending_price_data(n=100)
-        signals = atr_sigs(price_data)
-        result = run_backtest("ATR", signals, "2023-01-01", "2023-12-31")
+        signals = [s.to_dict() for s in hybrid_sigs(price_data, sentiment_level=1)]
+        result = run_backtest("Hybrid", signals, "2023-01-01", "2023-12-31")
         d = result.to_dict()
         for key in [
             "strategy_name", "window_start", "window_end", "initial_capital",

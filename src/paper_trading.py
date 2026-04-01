@@ -29,7 +29,6 @@ from src.execution.order_manager import OrderManager, TradeSignal
 from src.agents.sentiment_classifier import SentimentClassifier
 from src.agents.llm_agent import LLMAgent
 from src.data.metals_api import get_latest_prices
-from src.data.alpha_vantage import get_all_equity_quotes
 from src.strategies.hybrid import generate_signals as hybrid_signals
 
 logger = logging.getLogger(__name__)
