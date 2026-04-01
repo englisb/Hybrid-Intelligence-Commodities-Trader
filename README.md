@@ -72,7 +72,7 @@ Quantitative algorithms process historical data at high speeds but lack contextu
 │   │   └── hybrid.py              # Primary: ATR + sentiment overlay
 │   ├── backtesting/
 │   │   └── backtester.py          # Historical simulation engine
-│   └── paper_trading.py           # 1-week live simulation (zero capital risk)
+│   └── paper_trading.py           # Multi-scale predictive accuracy backtest
 └── tests/
     ├── test_portfolio.py
     ├── test_risk_manager.py
@@ -103,10 +103,10 @@ cp .env.example .env
 # Continuous news monitoring + trading (default)
 python main.py monitor
 
-# Historical backtesting (2007-2009, 2015-2018, 2019-2022, 2023-2026)
+# Historical backtesting (2007-2009, 2015-2018, 2019-2022, 2023-2025)
 python main.py backtest
 
-# 1-week paper trading simulation (zero capital risk)
+# Multi-scale predictive accuracy backtest (5-year → weekly → daily, zero capital risk)
 python main.py paper
 ```
 
@@ -125,7 +125,7 @@ pytest tests/ -v
 | 1 | 2007–2009 | Global Financial Crisis |
 | 2 | 2015–2018 | Recovery / Low volatility |
 | 3 | 2019–2022 | COVID-19 + Recovery |
-| 4 | 2023–2026 | Post-pandemic / Geopolitical stress |
+| 4 | 2023–2025 | Post-pandemic / Geopolitical stress |
 
 ## Commodities & Tickers
 
