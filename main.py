@@ -40,31 +40,79 @@ def _run_monitor() -> None:
     agent.run_monitoring_loop()
 
 
-def _run_backtest() -> None:
-    """Run backtests on synthetic data for all configured windows."""
+def _fetch_gold_ohlcv(start: str, end: str) -> list[dict]:
+    """
+    Fetch gold (XAU) OHLCV data from Metals-API for the given date range.
+
+    Falls back to a deterministic synthetic series when ``METALS_API_KEY`` is
+    not configured or the API call fails, so the application remains runnable
+    without live credentials.
+    """
+    import config
+    from src.data.metals_api import get_historical_prices_range, format_as_ohlcv
+
+    if config.METALS_API_KEY:
+        try:
+            records = get_historical_prices_range(
+                config.COMMODITIES["gold"], start, end
+            )
+            if records:
+                logger.info(
+                    "Fetched %d days of XAU data from Metals-API (%s→%s).",
+                    len(records),
+                    start,
+                    end,
+                )
+                return format_as_ohlcv(records)
+            logger.warning(
+                "Metals-API returned no data for XAU %s→%s; using synthetic fallback.",
+                start,
+                end,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Metals-API request failed for %s→%s: %s. Using synthetic fallback.",
+                start,
+                end,
+                exc,
+            )
+    else:
+        logger.warning(
+            "METALS_API_KEY not set; using synthetic price data for %s→%s.",
+            start,
+            end,
+        )
+
+    # Deterministic synthetic fallback
     import numpy as np
+    from datetime import datetime as _dt, timedelta as _td
+
+    np.random.seed(42)
+    n_days = 252
+    prices = 1800.0 * np.cumprod(1 + np.random.normal(0.0003, 0.01, n_days))
+    start_dt = _dt.strptime(start, "%Y-%m-%d")
+    return [
+        {
+            "date": (start_dt + _td(days=i)).strftime("%Y-%m-%d"),
+            "open": float(prices[i] * 0.999),
+            "high": float(prices[i] * 1.005),
+            "low": float(prices[i] * 0.995),
+            "close": float(prices[i]),
+            "adjusted_close": float(prices[i]),
+        }
+        for i in range(n_days)
+    ]
+
+
+def _run_backtest() -> None:
+    """Run backtests on Metals-API historical data for all configured windows."""
     import config
     from src.backtesting.backtester import run_backtest
     from src.strategies.hybrid import generate_signals as hybrid_sigs
-    from src.strategies.atr_trend import generate_signals as atr_sigs
 
     results = []
     for start, end in config.BACKTEST_WINDOWS:
-        # Generate synthetic price data (placeholder: replace with real API data)
-        np.random.seed(42)
-        n_days = 252
-        prices = 1800.0 * np.cumprod(1 + np.random.normal(0.0003, 0.01, n_days))
-        price_data = [
-            {
-                "date": f"{start[:4]}-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
-                "open": float(prices[i] * 0.999),
-                "high": float(prices[i] * 1.005),
-                "low": float(prices[i] * 0.995),
-                "close": float(prices[i]),
-                "adjusted_close": float(prices[i]),
-            }
-            for i in range(n_days)
-        ]
+        price_data = _fetch_gold_ohlcv(start, end)
 
         signals = hybrid_sigs(price_data, sentiment_level=1)
         signal_dicts = [s.to_dict() for s in signals]
@@ -95,33 +143,25 @@ def _run_paper() -> None:
 
 
 def _run_compare() -> None:
-    """Compare Hybrid, ATR, and VIX-Gold strategies on synthetic data."""
-    import numpy as np
+    """Compare Hybrid, ATR, and VIX-Gold strategies using Metals-API gold data."""
     from src.backtesting.backtester import run_backtest
     from src.backtesting.monte_carlo import run_monte_carlo
     from src.strategies.hybrid import generate_signals as hybrid_sigs
     from src.strategies.atr_trend import generate_signals as atr_sigs
     from src.strategies.vix_gold_hedge import generate_signals as vix_sigs
 
-    np.random.seed(99)
-    n = 252
-    gold_prices = 1800.0 * np.cumprod(1 + np.random.normal(0.0003, 0.01, n))
-    vix_values = 20.0 + np.random.normal(0, 5, n).cumsum() * 0.1
+    price_data = _fetch_gold_ohlcv("2023-01-01", "2023-12-31")
 
-    price_data = [
-        {
-            "date": f"2023-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
-            "open": float(gold_prices[i] * 0.999),
-            "high": float(gold_prices[i] * 1.005),
-            "low": float(gold_prices[i] * 0.995),
-            "close": float(gold_prices[i]),
-            "adjusted_close": float(gold_prices[i]),
-        }
-        for i in range(n)
-    ]
+    # VIX is not available from Metals-API; use a synthetic series aligned to
+    # the fetched gold dates.
+    import numpy as np
+
+    np.random.seed(99)
+    n = len(price_data)
+    vix_values = 20.0 + np.random.normal(0, 5, n).cumsum() * 0.1
     vix_data = [
         {
-            "date": f"2023-{i // 28 + 1:02d}-{i % 28 + 1:02d}",
+            "date": price_data[i]["date"],
             "close": float(max(vix_values[i], 5)),
         }
         for i in range(n)
